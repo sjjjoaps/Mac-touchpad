@@ -94,6 +94,25 @@ impl FingerCounter {
         )
     }
 
+    /// Re-anchor all counters for a resumed drag, so the cursor continues moving
+    /// immediately instead of having to re-cross the start threshold.
+    pub fn restore_continuation(&mut self, fingers: i32) {
+        self.original_fingers_count = fingers;
+        self.short_delay_fingers_count = fingers;
+        self.long_delay_fingers_count = fingers;
+        self.short_delay_fingers_move = 0.0;
+        self.long_delay_fingers_move = 0.0;
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    #[cfg(test)]
+    pub fn original_count(&self) -> i32 {
+        self.original_fingers_count
+    }
+
     /// Check if old and new contact lists have the same set of contact IDs.
     pub fn are_contacts_ids_common(
         old_contacts: &[TouchpadContact],

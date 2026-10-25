@@ -239,10 +239,7 @@ impl GestureEngine {
                 action
             }
         } else if finger_count == 2 {
-            // 2 fingers — native scroll
-            if self.drag.is_dragging() {
-                self.drag.force_stop(&self.config, &mut self.mouse);
-            }
+            // 2 fingers — native scroll, or a 3-finger drag that lost a finger
             self.edge_slide.reset();
             self.swipe_detector.reset();
             self.pinch_detector.reset();
@@ -254,22 +251,26 @@ impl GestureEngine {
 
             TOUCHPAD_SCROLLING.store(false, Ordering::Relaxed);
 
-            TimerAction::None
+            self.handle_drag_with_reduced_fingers(device_id, &old, &contacts, elapsed)
         } else if finger_count == 1 {
             // Single finger: edge slide for volume/brightness
-            if self.drag.is_dragging() {
-                self.drag.force_stop(&self.config, &mut self.mouse);
-            }
             self.two_finger_swipe.reset();
             self.swipe_detector.reset();
             self.pinch_detector.reset();
+
+            let drag_action =
+                self.handle_drag_with_reduced_fingers(device_id, &old, &contacts, elapsed);
 
             // NOTE: Do NOT feed three_finger_tap here.
             // When lifting 3 fingers, hardware reports 3→2→1→0 frames.
             // Feeding intermediate frames (1 finger) would cancel the tap
             // due to finger count mismatch in the TapDetector.
 
-            if self.config.edge_slide_enabled && !self.four_finger_action_triggered {
+            // Edge slide must not fire while the drag still holds the button.
+            if !self.drag.is_dragging()
+                && self.config.edge_slide_enabled
+                && !self.four_finger_action_triggered
+            {
                 if let Some(action) = self.edge_slide.feed(
                     &contacts,
                     (0, 4096),
@@ -283,7 +284,7 @@ impl GestureEngine {
                 }
             }
 
-            TimerAction::None
+            drag_action
         } else {
             // No fingers — reset position tracking but keep velocity for momentum decay
             TOUCHPAD_SCROLLING.store(false, Ordering::Relaxed);
@@ -308,11 +309,15 @@ impl GestureEngine {
                 crate::debug::log_debug("GESTURE", format!("3-Finger Tap: {:?}", self.config.three_finger_tap_action));
                 self.execute_action_for_slot(self.config.three_finger_tap_action, "three_finger_tap");
             }
-            self.drag.force_stop(&self.config, &mut self.mouse);
+
+            // Keep a pending drag pressed until the release delay expires
+            // instead of dropping the dragged item immediately.
+            let drag_action =
+                self.handle_drag_with_reduced_fingers(device_id, &old, &contacts, elapsed);
 
             self.four_finger_action_triggered = false;
 
-            TimerAction::None
+            drag_action
         };
 
         self.last_contact_time = now;
@@ -322,6 +327,41 @@ impl GestureEngine {
         self.old_contacts = contacts;
 
         timer_action
+    }
+
+    /// Frames with fewer than 3 fingers while a drag may still be active.
+    ///
+    /// Two fingers still continue the drag in both modes; momentary contact
+    /// drops must not release the button, or the following frame presses it
+    /// again and Windows turns the pair into a click. With "release and
+    /// restart" disabled the drag ends on the first real lift (1 or 0
+    /// contacts); with it enabled the button is held until the timer expires.
+    fn handle_drag_with_reduced_fingers(
+        &mut self,
+        device_id: &str,
+        old_contacts: &[TouchpadContact],
+        contacts: &[TouchpadContact],
+        elapsed: i64,
+    ) -> TimerAction {
+        if !self.drag.is_dragging() {
+            return TimerAction::None;
+        }
+        if !self.config.allow_release_and_restart && contacts.len() < 2 {
+            self.drag.force_stop(&self.config, &mut self.mouse);
+            return TimerAction::StopTimer;
+        }
+        if contacts.len() == 1 {
+            // One finger left: keep the drag held until the timer runs out.
+            return TimerAction::StartTimer(self.drag.get_release_delay(&self.config));
+        }
+        self.drag.on_touchpad_contact(
+            device_id,
+            &self.config,
+            &mut self.mouse,
+            old_contacts,
+            contacts,
+            elapsed,
+        )
     }
 
     /// Called when the drag-end timer fires.
